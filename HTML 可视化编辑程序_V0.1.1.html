@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HTML 可视化编辑程序_V0.1.1 </title>
+<style>
+    body { font-family: 'Microsoft YaHei', sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; background: #f0f2f5; }
+    .toolbar { background: #fff; padding: 15px 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 10; display: flex; gap: 15px; align-items: center; flex-wrap: wrap; }
+    .toolbar-group { display: flex; align-items: center; gap: 10px; border-right: 1px solid #eee; padding-right: 15px; margin-bottom: 5px; }
+    .toolbar-group:last-child { border-right: none; }
+    button, input[type="file"], input[type="text"], select, input[type="color"], input[type="number"] { padding: 6px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; outline: none; }
+    button { background: #4776E6; color: white; cursor: pointer; border: none; transition: 0.3s; }
+    button:hover { background: #355cbc; }
+    button.btn-success { background: #2ecc71; font-weight: bold; }
+    button.btn-alt { background: #8e44ad; }
+    
+    #preview-container { flex: 1; position: relative; padding: 20px; box-sizing: border-box; display: flex; }
+    #preview-frame { flex: 1; width: 100%; height: 100%; border: 2px dashed #bdc3c7; border-radius: 10px; background: white; box-shadow: 0 5px 15px rgba(0,0,0,0.05); display: block; }
+    
+    #floating-toolbar {
+        position: absolute; display: none; background: #333; border-radius: 8px; padding: 5px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.2); z-index: 1000; gap: 5px; align-items: center; transition: opacity 0.2s;
+    }
+    #floating-toolbar button { background: transparent; border: none; color: white; padding: 5px 10px; border-radius: 4px; }
+    #floating-toolbar button:hover { background: #555; }
+    #floating-toolbar input[type="number"] { width: 50px; padding: 4px; background: #444; color: white; border: 1px solid #666; }
+    #floating-toolbar input[type="color"] { width: 25px; height: 25px; padding: 0; border: none; background: transparent; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+    <div class="toolbar-group">
+        <label><strong>1. 导入：</strong></label>
+        <input type="file" id="htmlInput" accept=".html">
+    </div>
+    <div class="toolbar-group">
+        <label><strong>2. 插入媒体：</strong></label>
+        <input type="text" id="onlineMediaUrl" placeholder="输入链接" style="width: 150px;">
+        <select id="onlineMediaType">
+            <option value="image">图片</option>
+            <option value="video">视频</option>
+            <option value="audio">音频</option>
+        </select>
+        <button onclick="insertOnlineMedia()">插入</button>
+        <button class="btn-alt" onclick="insertFloatingAudio()">设为悬浮音乐</button>
+    </div>
+    <div class="toolbar-group">
+        <label><strong>3. 插入本地：</strong></label>
+        <input type="file" id="localMediaInput" accept="image/*,video/*,audio/*">
+    </div>
+    <div class="toolbar-group" style="margin-left: auto;">
+        <span style="font-size:12px;color:#666;">*双击媒体边缘跳转，拖拽四角缩放</span>
+        <button class="btn-success" onclick="exportHTML()">📥 导出文件</button>
+    </div>
+</div>
+
+<div id="preview-container">
+    <iframe id="preview-frame" title="预览区"></iframe>
+    <div id="floating-toolbar">
+        <button onclick="execCmd('bold')" style="font-weight:bold;">B</button>
+        <button onclick="execCmd('italic')" style="font-style:italic;">I</button>
+        <input type="color" id="floatTextColor" onchange="execCmd('foreColor', this.value)" title="颜色">
+        <input type="number" id="customFontSize" placeholder="字号" title="输入字号后回车" onchange="applyCustomFontSize(this.value)">
+        <span style="color:white; font-size:12px;">px</span>
+    </div>
+</div>
+
+<script>
+    let previewFrame = document.getElementById('preview-frame');
+    const floatingToolbar = document.getElementById('floating-toolbar');
+    let currentFileName = "modified.html";
+    let activeMediaElement = null;
+    let currentIframeDoc = null;
+
+    function initIframeEnvironment(doc) {
+        currentIframeDoc = doc;
+        doc.designMode = "on";
+        
+        // 注入样式控制和辅助UI (修复了 media-wrapper 导致换行的问题)
+        const style = doc.createElement('style');
+        style.id = "editor-injected-style";
+        style.textContent = `
+            .media-wrapper { display: inline-block; vertical-align: middle; position: relative; margin: 5px; max-width: 100%; }
+            .media-wrapper img, .media-wrapper video, .media-wrapper iframe, .media-wrapper audio { display: block; width: 100%; height: 100%; }
+            .media-wrapper.active { outline: 2px dashed #4776E6; }
+            .resize-handle { position: absolute; width: 14px; height: 14px; background: #fff; border: 2px solid #4776E6; border-radius: 50%; z-index: 9999; }
+            .resize-handle.br { bottom: -7px; right: -7px; cursor: se-resize; }
+            .resize-handle.bl { bottom: -7px; left: -7px; cursor: sw-resize; }
+            .resize-handle.tr { top: -7px; right: -7px; cursor: ne-resize; }
+            .resize-handle.tl { top: -7px; left: -7px; cursor: nw-resize; }
+            .media-overlay { position: absolute; top:0; left:0; width:100%; height:100%; z-index: 10; display: none; }
+            .media-wrapper.active .media-overlay { display: block; background: rgba(0,0,0,0.05); cursor: move; }
+        `;
+        doc.head.appendChild(style);
+
+        doc.addEventListener('selectionchange', () => {
+            const selection = doc.getSelection();
+            if (selection.rangeCount > 0 && !selection.isCollapsed) {
+                const range = selection.getRangeAt(0);
+                const rect = range.getBoundingClientRect();
+                const iframeRect = previewFrame.getBoundingClientRect();
+                floatingToolbar.style.display = 'flex';
+                floatingToolbar.style.left = (iframeRect.left + rect.left + rect.width / 2 - floatingToolbar.offsetWidth / 2) + 'px';
+                floatingToolbar.style.top = (iframeRect.top + rect.top - 40) + 'px';
+            } else {
+                floatingToolbar.style.display = 'none';
+            }
+        });
+
+        doc.addEventListener('mousedown', handleMediaInteraction);
+        doc.addEventListener('dblclick', handleMediaDoubleClick);
+    }
+
+    function handleMediaInteraction(e) {
+        if (e.target.classList.contains('resize-handle')) {
+            e.preventDefault(); e.stopPropagation();
+            startMediaResize(e); return;
+        }
+
+        let targetWrapper = e.target.closest('.media-wrapper');
+        const mediaTags = ['IMG', 'VIDEO', 'IFRAME', 'AUDIO'];
+        
+        if (!targetWrapper && mediaTags.includes(e.target.tagName)) {
+            targetWrapper = currentIframeDoc.createElement('div');
+            targetWrapper.className = 'media-wrapper';
+            targetWrapper.style.width = e.target.offsetWidth ? e.target.offsetWidth + 'px' : '300px';
+            targetWrapper.contentEditable = "false";
+            e.target.parentNode.insertBefore(targetWrapper, e.target);
+            targetWrapper.appendChild(e.target);
+            
+            const overlay = currentIframeDoc.createElement('div');
+            overlay.className = 'media-overlay';
+            targetWrapper.appendChild(overlay);
+
+            ['tl', 'tr', 'bl', 'br'].forEach(pos => {
+                const handle = currentIframeDoc.createElement('div');
+                handle.className = `resize-handle ${pos}`;
+                targetWrapper.appendChild(handle);
+            });
+        }
+
+        if (activeMediaElement) activeMediaElement.classList.remove('active');
+        if (targetWrapper) {
+            targetWrapper.classList.add('active');
+            activeMediaElement = targetWrapper;
+        } else {
+            activeMediaElement = null;
+        }
+    }
+
+    function startMediaResize(e) {
+        const wrapper = e.target.parentElement;
+        const handleType = Array.from(e.target.classList).find(c => c.length === 2);
+        const startX = e.clientX, startY = e.clientY;
+        const startWidth = wrapper.offsetWidth, startHeight = wrapper.offsetHeight;
+
+        function onMouseMove(moveEvent) {
+            let newWidth = startWidth, newHeight = startHeight;
+            if (handleType.includes('r')) newWidth = startWidth + (moveEvent.clientX - startX);
+            if (handleType.includes('l')) newWidth = startWidth - (moveEvent.clientX - startX);
+            if (handleType.includes('b')) newHeight = startHeight + (moveEvent.clientY - startY);
+            if (handleType.includes('t')) newHeight = startHeight - (moveEvent.clientY - startY);
+            wrapper.style.width = Math.max(50, newWidth) + 'px';
+            wrapper.style.height = Math.max(50, newHeight) + 'px';
+        }
+        function onMouseUp() {
+            currentIframeDoc.removeEventListener('mousemove', onMouseMove);
+            currentIframeDoc.removeEventListener('mouseup', onMouseUp);
+        }
+        currentIframeDoc.addEventListener('mousemove', onMouseMove);
+        currentIframeDoc.addEventListener('mouseup', onMouseUp);
+    }
+
+    function handleMediaDoubleClick(e) {
+        const wrapper = e.target.closest('.media-wrapper');
+        if (wrapper) {
+            const media = wrapper.querySelector('img, video, iframe, audio');
+            const src = media.src || (media.querySelector('source') && media.querySelector('source').src);
+            if (src) {
+                alert("即将跳转原链接: " + src);
+                window.open(src, '_blank');
+            }
+        }
+    }
+
+    function execCmd(command, value = null) {
+        if (currentIframeDoc) {
+            currentIframeDoc.execCommand(command, false, value);
+            previewFrame.contentWindow.focus();
+        }
+    }
+
+    function applyCustomFontSize(size) {
+        if (!size || !currentIframeDoc) return;
+        const span = currentIframeDoc.createElement("span");
+        span.style.fontSize = size + "px";
+        const selection = currentIframeDoc.getSelection();
+        if (selection.rangeCount) {
+            const range = selection.getRangeAt(0);
+            range.surroundContents(span);
+        }
+    }
+
+    function insertOnlineMedia() {
+        const url = document.getElementById('onlineMediaUrl').value.trim();
+        const type = document.getElementById('onlineMediaType').value;
+        if (!url || !currentIframeDoc) return;
+        let html = '';
+        if (type === 'image') {
+            // 修复点：直接为 img 元素设置 inline-block 和垂直居中，避免被 wrapper 的 block 属性干扰坍缩
+            html = `<img src="${url}" style="max-width:300px; display: inline-block; vertical-align: middle;">`;
+        } else if (type === 'video') {
+            const ytMatch = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^\"&?/\s]{11})/i);
+            const biliMatch = url.match(/bilibili\.com\/video\/(BV[a-zA-Z0-9]+)/i);
+            if (ytMatch && ytMatch[1]) {
+                html = `<iframe src="https://www.youtube.com/embed/${ytMatch[1]}" frameborder="0" allowfullscreen style="width:560px; height:315px;"></iframe>`;
+            } else if (biliMatch && biliMatch[1]) {
+                html = `<iframe src="https://player.bilibili.com/player.html?bvid=${biliMatch[1]}&high_quality=1&danmaku=0&autoplay=0&cover=1" scrolling="no" border="0" frameborder="no" framespacing="0" allowfullscreen style="width:560px; height:315px;"></iframe>`;
+            } else {
+                html = `<video controls style="width:500px;"><source src="${url}"></video>`;
+            }
+        } else if (type === 'audio') {
+            html = `<audio controls><source src="${url}"></audio>`;
+        }
+        previewFrame.contentWindow.focus();
+        currentIframeDoc.execCommand('insertHTML', false, html);
+    }
+
+    document.getElementById('localMediaInput').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(event) {
+            const base64Data = event.target.result;
+            const fileType = file.type;
+            let html = '';
+
+            if (fileType.startsWith('image/')) {
+                // 同样增加 display: inline-block; vertical-align: middle;
+                html = `<img src="${base64Data}" style="max-width:300px; max-height:300px; display: inline-block; vertical-align: middle; border-radius:10px;">`;
+            } else if (fileType.startsWith('video/')) {
+                html = `<video controls style="max-width:500px;"><source src="${base64Data}"></video>`;
+            } else if (fileType.startsWith('audio/')) {
+                html = `<audio controls><source src="${base64Data}"></audio>`;
+            }
+
+            if (html && currentIframeDoc) {
+                previewFrame.contentWindow.focus();
+                currentIframeDoc.execCommand('insertHTML', false, html);
+            }
+        };
+        reader.readAsDataURL(file);
+    });
+
+    function insertFloatingAudio() {
+        const url = document.getElementById('onlineMediaUrl').value.trim();
+        if (!url || !currentIframeDoc) return;
+        const html = `<audio controls autoplay loop style="position:fixed; bottom:20px; right:20px; z-index:9999; box-shadow:0 4px 10px rgba(0,0,0,0.3); border-radius:30px;"><source src="${url}"></audio>`;
+        currentIframeDoc.execCommand('insertHTML', false, html);
+    }
+
+    document.getElementById('htmlInput').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        currentFileName = file.name.replace('.html', '_modified.html');
+        
+        const reader = new FileReader();
+        reader.onload = function(event) {
+            const container = document.getElementById('preview-container');
+            const oldIframe = document.getElementById('preview-frame');
+            
+            const newIframe = document.createElement('iframe');
+            newIframe.id = 'preview-frame';
+            newIframe.title = '预览区';
+            
+            container.replaceChild(newIframe, oldIframe);
+            previewFrame = newIframe;
+
+            const doc = previewFrame.contentDocument || previewFrame.contentWindow.document;
+            doc.open();
+            doc.write(event.target.result);
+            doc.close();
+
+            newIframe.onload = function() {
+                initIframeEnvironment(doc);
+            };
+        };
+        reader.readAsText(file);
+    });
+
+    function exportHTML() {
+        if (!currentIframeDoc) return;
+        const tempDoc = currentIframeDoc.cloneNode(true);
+        const injectedStyle = tempDoc.getElementById('editor-injected-style');
+        if (injectedStyle) injectedStyle.remove();
+        
+        const wrappers = tempDoc.querySelectorAll('.media-wrapper');
+        wrappers.forEach(w => {
+            const media = w.querySelector('img, video, iframe, audio');
+            if (media) w.replaceWith(media);
+        });
+
+        const blob = new Blob([tempDoc.documentElement.outerHTML], { type: 'text/html' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = currentFileName;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    window.onload = () => {
+        const doc = previewFrame.contentDocument || previewFrame.contentWindow.document;
+        doc.open();
+        doc.write("<!DOCTYPE html><html><head></head><body><p>请点击上方导入HTML文件，或在此处直接编辑、插入媒体进行调试。</p></body></html>");
+        doc.close();
+        initIframeEnvironment(doc);
+    };
+</script>
+
+</body>
+</html>
